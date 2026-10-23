@@ -15,6 +15,9 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -30,6 +33,8 @@ public class MonitorService extends Service {
     public static volatile String statusText = "Stopped";
     public static volatile String actualInput = "—";
     public static volatile String actualOutput = "—";
+    public static volatile String captureMode = "—";
+    public static volatile boolean routeStable = false;
     public static volatile boolean alarmActive = false;
     public static volatile boolean monitoring = false;
 
@@ -41,6 +46,9 @@ public class MonitorService extends Service {
     private AudioRecord recorder;
     private AudioTrack monitorTrack;
     private AlarmPlayer alarmPlayer;
+    private AutomaticGainControl automaticGainControl;
+    private NoiseSuppressor noiseSuppressor;
+    private AcousticEchoCanceler acousticEchoCanceler;
     private AudioManager audioManager;
     private PowerManager.WakeLock wakeLock;
 
@@ -106,8 +114,10 @@ public class MonitorService extends Service {
     private void monitorLoop() {
         long belowSince = 0L;
         long aboveSince = 0L;
-        long graceUntil = System.currentTimeMillis() + 5000L;
+        long routeMatchedSince = 0L;
         double smoothedRms = 0.0;
+        routeStable = false;
+        captureMode = "Selecting capture mode…";
 
         try {
             AudioDeviceInfo selectedInput = findDevice(inputDeviceId, true);
@@ -138,8 +148,11 @@ public class MonitorService extends Service {
             }
             if (minRecord <= 0) throw new IllegalStateException("No supported recording sample rate");
 
+            int audioSource = chooseAudioSource(bluetoothSco);
+            captureMode = audioSourceName(audioSource);
+
             recorder = new AudioRecord.Builder()
-                    .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                    .setAudioSource(audioSource)
                     .setAudioFormat(new AudioFormat.Builder()
                             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                             .setSampleRate(sampleRate)
@@ -149,6 +162,7 @@ public class MonitorService extends Service {
                     .build();
 
             recorder.setPreferredDevice(selectedInput);
+            disableVoiceProcessing(recorder.getAudioSessionId());
 
             int minPlay = AudioTrack.getMinBufferSize(
                     sampleRate,
@@ -184,7 +198,7 @@ public class MonitorService extends Service {
                     ? (selectedOutput == null ? "System default" : deviceLabel(selectedOutput))
                     : deviceLabel(routedOut);
 
-            statusText = "Monitoring";
+            statusText = "Waiting for selected microphone route…";
             updateNotification();
 
             short[] buffer = new short[Math.max(1024, minRecord / 2)];
@@ -213,7 +227,39 @@ public class MonitorService extends Service {
                 if (ri != null) actualInput = deviceLabel(ri);
 
                 long now = System.currentTimeMillis();
-                if (now < graceUntil || alarmActive) continue;
+                boolean inputMatches = sameAudioDevice(selectedInput, ri);
+
+                if (!inputMatches) {
+                    routeMatchedSince = 0L;
+                    routeStable = false;
+                    belowSince = 0L;
+                    aboveSince = 0L;
+                    statusText = "Waiting for selected mic — routed to " +
+                            (ri == null ? "unknown" : deviceLabel(ri));
+                    continue;
+                }
+
+                if (routeMatchedSince == 0L) {
+                    routeMatchedSince = now;
+                    routeStable = false;
+                    belowSince = 0L;
+                    aboveSince = 0L;
+                    smoothedRms = rms;
+                    statusText = "Selected mic connected — stabilizing…";
+                    continue;
+                }
+
+                if (!routeStable && now - routeMatchedSince >= 3000L) {
+                    routeStable = true;
+                    belowSince = 0L;
+                    aboveSince = 0L;
+                    smoothedRms = rms;
+                    currentDb = 20.0 * Math.log10(Math.max(smoothedRms / 32767.0, 0.000001));
+                    statusText = "Monitoring — route stable";
+                    updateNotification();
+                }
+
+                if (!routeStable || alarmActive) continue;
 
                 if (currentDb < lowThreshold) {
                     if (belowSince == 0L) belowSince = now;
@@ -244,6 +290,68 @@ public class MonitorService extends Service {
                 currentDb = -120.0;
             }
             updateNotification();
+        }
+    }
+
+    private int chooseAudioSource(boolean bluetoothSco) {
+        if (bluetoothSco) {
+            // VOICE_RECOGNITION avoids the call-oriented AGC/noise suppression used by VOICE_COMMUNICATION.
+            return MediaRecorder.AudioSource.VOICE_RECOGNITION;
+        }
+
+        if (audioManager != null) {
+            String unprocessed = audioManager.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED);
+            if ("true".equalsIgnoreCase(unprocessed)) {
+                return MediaRecorder.AudioSource.UNPROCESSED;
+            }
+        }
+        return MediaRecorder.AudioSource.VOICE_RECOGNITION;
+    }
+
+    private String audioSourceName(int source) {
+        if (source == MediaRecorder.AudioSource.UNPROCESSED) {
+            return "UNPROCESSED (raw input)";
+        }
+        if (source == MediaRecorder.AudioSource.VOICE_RECOGNITION) {
+            return "VOICE_RECOGNITION (AGC/noise suppression avoided)";
+        }
+        return "Audio source " + source;
+    }
+
+    private void disableVoiceProcessing(int sessionId) {
+        try {
+            if (AutomaticGainControl.isAvailable()) {
+                automaticGainControl = AutomaticGainControl.create(sessionId);
+                if (automaticGainControl != null) automaticGainControl.setEnabled(false);
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(sessionId);
+                if (noiseSuppressor != null) noiseSuppressor.setEnabled(false);
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                acousticEchoCanceler = AcousticEchoCanceler.create(sessionId);
+                if (acousticEchoCanceler != null) acousticEchoCanceler.setEnabled(false);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private boolean sameAudioDevice(AudioDeviceInfo selected, AudioDeviceInfo routed) {
+        if (selected == null || routed == null) return false;
+        if (selected.getId() == routed.getId()) return true;
+        if (selected.getType() != routed.getType()) return false;
+
+        try {
+            String a = selected.getProductName() == null ? "" : selected.getProductName().toString();
+            String b = routed.getProductName() == null ? "" : routed.getProductName().toString();
+            return a.equals(b);
+        } catch (SecurityException e) {
+            return true;
         }
     }
 
@@ -405,6 +513,21 @@ public class MonitorService extends Service {
             monitorTrack = null;
         }
 
+        if (automaticGainControl != null) {
+            try { automaticGainControl.release(); } catch (Exception ignored) {}
+            automaticGainControl = null;
+        }
+        if (noiseSuppressor != null) {
+            try { noiseSuppressor.release(); } catch (Exception ignored) {}
+            noiseSuppressor = null;
+        }
+        if (acousticEchoCanceler != null) {
+            try { acousticEchoCanceler.release(); } catch (Exception ignored) {}
+            acousticEchoCanceler = null;
+        }
+
+        routeStable = false;
+
         if (audioManager != null) {
             if (Build.VERSION.SDK_INT >= 31) {
                 try { audioManager.clearCommunicationDevice(); } catch (Exception ignored) {}
@@ -423,6 +546,8 @@ public class MonitorService extends Service {
         statusText = "Stopped";
         actualInput = "—";
         actualOutput = "—";
+        captureMode = "—";
+        routeStable = false;
         if (wakeLock != null && wakeLock.isHeld()) {
             try { wakeLock.release(); } catch (Exception ignored) {}
         }

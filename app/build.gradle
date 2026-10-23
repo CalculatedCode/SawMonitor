@@ -10,11 +10,23 @@ android {
         applicationId 'com.calculatedcode.sawmonitor'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '1.0'
+        versionCode 2
+        versionName '1.1'
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file('../ci/sawmonitor-debug.keystore')
+            storePassword 'sawmonitor'
+            keyAlias 'sawmonitor'
+            keyPassword 'sawmonitor'
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled false
         }

@@ -54,7 +54,9 @@ public class MainActivity extends Activity {
             dbText.setText(String.format(Locale.US, "%.1f dBFS", db));
             statusText.setText(MonitorService.statusText);
             routeText.setText("Actual input: " + MonitorService.actualInput +
-                    "\nActual output: " + MonitorService.actualOutput);
+                    "\nActual output: " + MonitorService.actualOutput +
+                    "\nCapture mode: " + MonitorService.captureMode +
+                    "\nRoute stable: " + (MonitorService.routeStable ? "yes" : "no"));
 
             int meterValue = (int) Math.round(Math.max(0.0, Math.min(100.0, db + 100.0)));
             meter.setProgress(meterValue);
@@ -116,7 +118,7 @@ public class MainActivity extends Activity {
         root.addView(hint);
 
         routeText = new TextView(this);
-        routeText.setText("Actual input: —\nActual output: —");
+        routeText.setText("Actual input: —\nActual output: —\nCapture mode: —\nRoute stable: no");
         routeText.setPadding(0, 0, 0, dp(12));
         root.addView(routeText);
 
