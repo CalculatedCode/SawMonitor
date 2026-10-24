@@ -20,6 +20,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -40,6 +41,9 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private TextView routeText;
     private ProgressBar meter;
+    private Button liveAudioButton;
+    private SeekBar liveVolume;
+    private TextView liveVolumeLabel;
 
     private final List<DeviceChoice> inputChoices = new ArrayList<>();
     private final List<DeviceChoice> outputChoices = new ArrayList<>();
@@ -51,7 +55,7 @@ public class MainActivity extends Activity {
             dbText.setText(String.format(Locale.US, "%.1f dBFS", db));
             statusText.setText(MonitorService.statusText);
             routeText.setText("Actual input: " + MonitorService.actualInput +
-                    "\nAlarm output: " + MonitorService.actualOutput +
+                    "\nOutput: " + MonitorService.actualOutput +
                     "\nCapture mode: " + MonitorService.captureMode +
                     "\nRoute stable: " + (MonitorService.routeStable ? "yes" : "no"));
 
@@ -61,6 +65,13 @@ public class MainActivity extends Activity {
             if (MonitorService.alarmActive) {
                 statusText.setText("⚠ " + MonitorService.statusText);
             }
+
+            if (liveAudioButton != null) {
+                liveAudioButton.setText(MonitorService.liveMonitorEnabled
+                        ? "Live audio: ON"
+                        : "Live audio: OFF");
+            }
+
             handler.postDelayed(this, 250);
         }
     };
@@ -110,9 +121,42 @@ public class MainActivity extends Activity {
         prepareHint.setPadding(0, dp(4), 0, dp(10));
         root.addView(prepareHint);
 
-        root.addView(sectionLabel("Alarm output"));
+        root.addView(sectionLabel("Alarm / live audio output"));
         outputSpinner = new Spinner(this);
         root.addView(outputSpinner, matchWrap());
+
+        liveAudioButton = new Button(this);
+        liveAudioButton.setText("Live audio: OFF");
+        liveAudioButton.setOnClickListener(v -> toggleLiveAudio());
+        root.addView(liveAudioButton, matchWrap());
+
+        root.addView(sectionLabel("Live audio volume"));
+        liveVolume = new SeekBar(this);
+        liveVolume.setMax(100);
+        liveVolume.setProgress(60);
+        root.addView(liveVolume, matchWrap());
+
+        liveVolumeLabel = new TextView(this);
+        liveVolumeLabel.setText("60%");
+        root.addView(liveVolumeLabel);
+
+        liveVolume.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                liveVolumeLabel.setText(progress + "%");
+                if (fromUser && MonitorService.monitoring && MonitorService.liveMonitorEnabled) {
+                    sendLiveAudioState(true);
+                }
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+
+        TextView liveHint = new TextView(this);
+        liveHint.setText("Optional. OFF only measures the sound level. ON also plays the JBL microphone through the selected output. No audio focus is requested, so normal media can continue playing.");
+        liveHint.setPadding(0, dp(4), 0, dp(10));
+        root.addView(liveHint);
 
         Button refresh = new Button(this);
         refresh.setText("Refresh audio devices");
@@ -120,12 +164,12 @@ public class MainActivity extends Activity {
         root.addView(refresh, matchWrap());
 
         TextView hint = new TextView(this);
-        hint.setText("For a JBL with a call microphone: keep Phone calls ON and turn Media audio OFF in Android Bluetooth settings. Then choose the Bluetooth call audio / SCO input here. The phone speaker is used only for the alarm.");
+        hint.setText("For a JBL with a call microphone: keep Phone calls ON and turn Media audio OFF in Android Bluetooth settings. Then choose the Bluetooth call audio / SCO input here. With Live audio OFF, the phone stays silent unless the alarm fires.");
         hint.setPadding(0, dp(8), 0, dp(16));
         root.addView(hint);
 
         routeText = new TextView(this);
-        routeText.setText("Actual input: —\nAlarm output: —\nCapture mode: —\nRoute stable: no");
+        routeText.setText("Actual input: —\nOutput: —\nCapture mode: —\nRoute stable: no");
         routeText.setPadding(0, 0, 0, dp(12));
         root.addView(routeText);
 
@@ -317,9 +361,38 @@ public class MainActivity extends Activity {
         i.putExtra("outputDeviceId", output.id);
         i.putExtra("lowThreshold", low);
         i.putExtra("holdMillis", Math.max(250L, (long) (hold * 1000.0)));
+        i.putExtra("liveMonitorEnabled", MonitorService.liveMonitorEnabled);
+        i.putExtra("monitorVolume", liveVolume.getProgress() / 100f);
 
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
         else startService(i);
+    }
+
+    private void toggleLiveAudio() {
+        boolean enable = !MonitorService.liveMonitorEnabled;
+        sendLiveAudioState(enable);
+    }
+
+    private void sendLiveAudioState(boolean enable) {
+        if (outputChoices.isEmpty()) return;
+
+        DeviceChoice output = (DeviceChoice) outputSpinner.getSelectedItem();
+        Intent i = new Intent(this, MonitorService.class);
+        i.setAction(MonitorService.ACTION_SET_LIVE_AUDIO);
+        i.putExtra("enabled", enable);
+        i.putExtra("outputDeviceId", output.id);
+        i.putExtra("monitorVolume", liveVolume.getProgress() / 100f);
+
+        if (MonitorService.monitoring) {
+            startService(i);
+        } else {
+            MonitorService.liveMonitorEnabled = enable;
+            MonitorService.monitorVolume = liveVolume.getProgress() / 100f;
+            liveAudioButton.setText(enable ? "Live audio: ON" : "Live audio: OFF");
+            Toast.makeText(this,
+                    enable ? "Live audio will start with monitoring" : "Live audio disabled",
+                    Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void stopMonitoring() {

@@ -8,10 +8,12 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
+import android.media.AudioTrack;
 import android.media.MediaRecorder;
 import android.media.audiofx.AcousticEchoCanceler;
 import android.media.audiofx.AutomaticGainControl;
@@ -26,6 +28,7 @@ import java.util.Locale;
 public class MonitorService extends Service {
     public static final String ACTION_START = "com.calculatedcode.sawmonitor.START";
     public static final String ACTION_ACK = "com.calculatedcode.sawmonitor.ACK";
+    public static final String ACTION_SET_LIVE_AUDIO = "com.calculatedcode.sawmonitor.SET_LIVE_AUDIO";
 
     public static volatile double currentDb = -120.0;
     public static volatile String statusText = "Stopped";
@@ -35,6 +38,8 @@ public class MonitorService extends Service {
     public static volatile boolean routeStable = false;
     public static volatile boolean alarmActive = false;
     public static volatile boolean monitoring = false;
+    public static volatile boolean liveMonitorEnabled = false;
+    public static volatile float monitorVolume = 0.60f;
 
     private static final String CHANNEL_ID = "saw_monitor";
     private static final int NOTIFICATION_ID = 101;
@@ -42,6 +47,7 @@ public class MonitorService extends Service {
     private volatile boolean running = false;
     private Thread monitorThread;
     private AudioRecord recorder;
+    private AudioTrack monitorTrack;
     private AlarmPlayer alarmPlayer;
     private AutomaticGainControl automaticGainControl;
     private NoiseSuppressor noiseSuppressor;
@@ -76,10 +82,33 @@ public class MonitorService extends Service {
             return START_STICKY;
         }
 
+        if (ACTION_SET_LIVE_AUDIO.equals(action)) {
+            if (intent != null) {
+                liveMonitorEnabled = intent.getBooleanExtra("enabled", liveMonitorEnabled);
+                outputDeviceId = intent.getIntExtra("outputDeviceId", outputDeviceId);
+                monitorVolume = Math.max(0f, Math.min(1f,
+                        intent.getFloatExtra("monitorVolume", monitorVolume)));
+            }
+            if (!liveMonitorEnabled) {
+                releaseLiveMonitorTrack();
+                actualOutput = outputLabel(false);
+            }
+            statusText = monitoring
+                    ? (liveMonitorEnabled ? "Monitoring — live audio ON" : "Monitoring — live audio OFF")
+                    : statusText;
+            updateNotification();
+            return START_STICKY;
+        }
+
         inputDeviceId = intent == null ? -1 : intent.getIntExtra("inputDeviceId", -1);
         outputDeviceId = intent == null ? -1 : intent.getIntExtra("outputDeviceId", -1);
         lowThreshold = intent == null ? -45.0 : intent.getDoubleExtra("lowThreshold", -45.0);
         holdMillis = intent == null ? 3000L : intent.getLongExtra("holdMillis", 3000L);
+        liveMonitorEnabled = intent != null
+                ? intent.getBooleanExtra("liveMonitorEnabled", liveMonitorEnabled)
+                : liveMonitorEnabled;
+        monitorVolume = intent == null ? monitorVolume : Math.max(0f, Math.min(1f,
+                intent.getFloatExtra("monitorVolume", monitorVolume)));
 
         Notification n = buildNotification("Starting audio monitor…");
         if (Build.VERSION.SDK_INT >= 29) {
@@ -161,8 +190,8 @@ public class MonitorService extends Service {
             AudioDeviceInfo routedIn = recorder.getRoutedDevice();
             actualInput = routedIn == null ? deviceLabel(selectedInput) : deviceLabel(routedIn);
             actualOutput = selectedOutput == null
-                    ? "Alarm only — system default"
-                    : "Alarm only — " + deviceLabel(selectedOutput);
+                    ? "Alarm/live audio — system default"
+                    : outputLabel(liveMonitorEnabled);
 
             statusText = "Waiting for selected microphone route…";
             updateNotification();
@@ -183,6 +212,21 @@ public class MonitorService extends Service {
                 else smoothedRms = 0.22 * rms + 0.78 * smoothedRms;
 
                 currentDb = 20.0 * Math.log10(Math.max(smoothedRms / 32767.0, 0.000001));
+
+                if (liveMonitorEnabled) {
+                    ensureLiveMonitorTrack(sampleRate);
+                    AudioTrack track = monitorTrack;
+                    if (track != null) {
+                        track.setVolume(monitorVolume);
+                        track.write(buffer, 0, read, AudioTrack.WRITE_BLOCKING);
+                        AudioDeviceInfo ro = track.getRoutedDevice();
+                        actualOutput = "Live audio ON — " +
+                                (ro == null ? outputLabelDevice() : deviceLabel(ro));
+                    }
+                } else if (monitorTrack != null) {
+                    releaseLiveMonitorTrack();
+                    actualOutput = outputLabel(false);
+                }
 
                 AudioDeviceInfo ri = recorder.getRoutedDevice();
                 if (ri != null) actualInput = deviceLabel(ri);
@@ -302,6 +346,65 @@ public class MonitorService extends Service {
         } catch (SecurityException e) {
             return true;
         }
+    }
+
+    private void ensureLiveMonitorTrack(int sampleRate) {
+        if (monitorTrack != null) return;
+
+        int minPlay = AudioTrack.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT);
+        if (minPlay <= 0) return;
+
+        try {
+            AudioTrack newTrack = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build())
+                    .setBufferSizeInBytes(Math.max(minPlay * 2, sampleRate))
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build();
+
+            AudioDeviceInfo output = findDevice(outputDeviceId, false);
+            if (output == null) output = findBuiltInSpeaker();
+            if (output != null) newTrack.setPreferredDevice(output);
+
+            newTrack.setVolume(monitorVolume);
+            newTrack.play();
+            monitorTrack = newTrack;
+        } catch (Exception e) {
+            releaseLiveMonitorTrack();
+            liveMonitorEnabled = false;
+            statusText = "Live audio error — level monitor still running";
+        }
+    }
+
+    private synchronized void releaseLiveMonitorTrack() {
+        AudioTrack track = monitorTrack;
+        monitorTrack = null;
+        if (track != null) {
+            try { track.pause(); } catch (Exception ignored) {}
+            try { track.flush(); } catch (Exception ignored) {}
+            try { track.stop(); } catch (Exception ignored) {}
+            try { track.release(); } catch (Exception ignored) {}
+        }
+    }
+
+    private String outputLabel(boolean live) {
+        return (live ? "Live audio ON — " : "Alarm only — ") + outputLabelDevice();
+    }
+
+    private String outputLabelDevice() {
+        AudioDeviceInfo output = findDevice(outputDeviceId, false);
+        if (output == null) output = findBuiltInSpeaker();
+        return output == null ? "system default" : deviceLabel(output);
     }
 
     private void configureBluetoothInput(AudioDeviceInfo selectedInput, boolean bluetoothSco) throws InterruptedException {
@@ -439,6 +542,7 @@ public class MonitorService extends Service {
         if (recorder != null) {
             try { recorder.stop(); } catch (Exception ignored) {}
         }
+        releaseLiveMonitorTrack();
         if (monitorThread != null) {
             monitorThread.interrupt();
             monitorThread = null;
@@ -453,6 +557,7 @@ public class MonitorService extends Service {
             try { recorder.release(); } catch (Exception ignored) {}
             recorder = null;
         }
+        releaseLiveMonitorTrack();
         if (automaticGainControl != null) {
             try { automaticGainControl.release(); } catch (Exception ignored) {}
             automaticGainControl = null;
@@ -488,6 +593,7 @@ public class MonitorService extends Service {
         actualOutput = "—";
         captureMode = "—";
         routeStable = false;
+        liveMonitorEnabled = false;
         if (wakeLock != null && wakeLock.isHeld()) {
             try { wakeLock.release(); } catch (Exception ignored) {}
         }
