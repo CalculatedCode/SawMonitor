@@ -1,5 +1,5 @@
 name: Build SawMonitor APK
-# v1.2 level-only monitor build
+# v1.2 level-only monitor build fixed
 
 on:
   workflow_dispatch:

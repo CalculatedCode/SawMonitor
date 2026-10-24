@@ -227,14 +227,6 @@ public class MonitorService extends Service {
                 } else {
                     belowSince = 0L;
                 }
-
-                if (currentDb > highThreshold) {
-                    if (aboveSince == 0L) aboveSince = now;
-                    if (now - aboveSince >= holdMillis) {
-                        triggerAlarm("TOO LOUD", currentDb);
-                    }
-                } else {
-                }
             }
         } catch (SecurityException e) {
             statusText = "Microphone/Bluetooth permission denied";
