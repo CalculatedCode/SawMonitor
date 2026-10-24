@@ -12,14 +12,12 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
-import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -35,10 +33,7 @@ public class MainActivity extends Activity {
     private Spinner inputSpinner;
     private Spinner outputSpinner;
     private EditText lowThreshold;
-    private EditText highThreshold;
     private EditText holdSeconds;
-    private SeekBar monitorVolume;
-    private TextView volumeLabel;
     private TextView dbText;
     private TextView statusText;
     private TextView routeText;
@@ -54,7 +49,7 @@ public class MainActivity extends Activity {
             dbText.setText(String.format(Locale.US, "%.1f dBFS", db));
             statusText.setText(MonitorService.statusText);
             routeText.setText("Actual input: " + MonitorService.actualInput +
-                    "\nActual output: " + MonitorService.actualOutput +
+                    "\nAlarm output: " + MonitorService.actualOutput +
                     "\nCapture mode: " + MonitorService.captureMode +
                     "\nRoute stable: " + (MonitorService.routeStable ? "yes" : "no"));
 
@@ -94,7 +89,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Listen to a call-capable Bluetooth speaker microphone on your phone and alarm when the sound level stays too quiet or too loud.");
+        subtitle.setText("Background level monitor for a call-capable Bluetooth speaker microphone. Other apps can play normal media; Saw Monitor only makes sound if the input stays too quiet.");
         subtitle.setTextSize(15);
         subtitle.setPadding(0, dp(6), 0, dp(16));
         root.addView(subtitle);
@@ -103,7 +98,7 @@ public class MainActivity extends Activity {
         inputSpinner = new Spinner(this);
         root.addView(inputSpinner, matchWrap());
 
-        root.addView(sectionLabel("Monitoring / alarm output"));
+        root.addView(sectionLabel("Alarm output"));
         outputSpinner = new Spinner(this);
         root.addView(outputSpinner, matchWrap());
 
@@ -118,7 +113,7 @@ public class MainActivity extends Activity {
         root.addView(hint);
 
         routeText = new TextView(this);
-        routeText.setText("Actual input: —\nActual output: —\nCapture mode: —\nRoute stable: no");
+        routeText.setText("Actual input: —\nAlarm output: —\nCapture mode: —\nRoute stable: no");
         routeText.setPadding(0, 0, 0, dp(12));
         root.addView(routeText);
 
@@ -144,30 +139,9 @@ public class MainActivity extends Activity {
         root.addView(sectionLabel("Low alarm threshold (dBFS)"));
         root.addView(lowThreshold, matchWrap());
 
-        highThreshold = numericField("-3");
-        root.addView(sectionLabel("High alarm threshold (dBFS)"));
-        root.addView(highThreshold, matchWrap());
-
         holdSeconds = numericField("3");
         root.addView(sectionLabel("Time outside threshold before alarm (seconds)"));
         root.addView(holdSeconds, matchWrap());
-
-        root.addView(sectionLabel("Live monitor volume"));
-        monitorVolume = new SeekBar(this);
-        monitorVolume.setMax(100);
-        monitorVolume.setProgress(75);
-        root.addView(monitorVolume, matchWrap());
-
-        volumeLabel = new TextView(this);
-        volumeLabel.setText("75%");
-        root.addView(volumeLabel);
-        monitorVolume.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                volumeLabel.setText(progress + "%");
-            }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
 
         statusText = new TextView(this);
         statusText.setText("Stopped");
@@ -286,29 +260,20 @@ public class MainActivity extends Activity {
         DeviceChoice output = (DeviceChoice) outputSpinner.getSelectedItem();
 
         double low;
-        double high;
         double hold;
         try {
             low = Double.parseDouble(lowThreshold.getText().toString().trim());
-            high = Double.parseDouble(highThreshold.getText().toString().trim());
             hold = Double.parseDouble(holdSeconds.getText().toString().trim());
         } catch (NumberFormatException e) {
             Toast.makeText(this, "Check the threshold and delay values", Toast.LENGTH_LONG).show();
             return;
         }
-        if (low >= high) {
-            Toast.makeText(this, "Low threshold must be lower than high threshold", Toast.LENGTH_LONG).show();
-            return;
-        }
-
         Intent i = new Intent(this, MonitorService.class);
         i.setAction(MonitorService.ACTION_START);
         i.putExtra("inputDeviceId", input.id);
         i.putExtra("outputDeviceId", output.id);
         i.putExtra("lowThreshold", low);
-        i.putExtra("highThreshold", high);
         i.putExtra("holdMillis", Math.max(250L, (long) (hold * 1000.0)));
-        i.putExtra("monitorVolume", monitorVolume.getProgress() / 100f);
 
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
         else startService(i);

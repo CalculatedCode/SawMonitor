@@ -8,12 +8,10 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
-import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
-import android.media.AudioTrack;
 import android.media.MediaRecorder;
 import android.media.audiofx.AcousticEchoCanceler;
 import android.media.audiofx.AutomaticGainControl;
@@ -44,7 +42,6 @@ public class MonitorService extends Service {
     private volatile boolean running = false;
     private Thread monitorThread;
     private AudioRecord recorder;
-    private AudioTrack monitorTrack;
     private AlarmPlayer alarmPlayer;
     private AutomaticGainControl automaticGainControl;
     private NoiseSuppressor noiseSuppressor;
@@ -55,9 +52,7 @@ public class MonitorService extends Service {
     private int inputDeviceId;
     private int outputDeviceId;
     private double lowThreshold;
-    private double highThreshold;
     private long holdMillis;
-    private float monitorVolume;
 
     @Override
     public void onCreate() {
@@ -84,9 +79,7 @@ public class MonitorService extends Service {
         inputDeviceId = intent == null ? -1 : intent.getIntExtra("inputDeviceId", -1);
         outputDeviceId = intent == null ? -1 : intent.getIntExtra("outputDeviceId", -1);
         lowThreshold = intent == null ? -45.0 : intent.getDoubleExtra("lowThreshold", -45.0);
-        highThreshold = intent == null ? -3.0 : intent.getDoubleExtra("highThreshold", -3.0);
         holdMillis = intent == null ? 3000L : intent.getLongExtra("holdMillis", 3000L);
-        monitorVolume = intent == null ? 0.75f : intent.getFloatExtra("monitorVolume", 0.75f);
 
         Notification n = buildNotification("Starting audio monitor…");
         if (Build.VERSION.SDK_INT >= 29) {
@@ -113,7 +106,6 @@ public class MonitorService extends Service {
 
     private void monitorLoop() {
         long belowSince = 0L;
-        long aboveSince = 0L;
         long routeMatchedSince = 0L;
         double smoothedRms = 0.0;
         routeStable = false;
@@ -163,40 +155,14 @@ public class MonitorService extends Service {
 
             recorder.setPreferredDevice(selectedInput);
             disableVoiceProcessing(recorder.getAudioSessionId());
-
-            int minPlay = AudioTrack.getMinBufferSize(
-                    sampleRate,
-                    AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT);
-            monitorTrack = new AudioTrack.Builder()
-                    .setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build())
-                    .setAudioFormat(new AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build())
-                    .setBufferSizeInBytes(Math.max(minPlay * 2, sampleRate))
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build();
-
-            if (selectedOutput != null) {
-                monitorTrack.setPreferredDevice(selectedOutput);
-            }
-            monitorTrack.setVolume(Math.max(0f, Math.min(1f, monitorVolume)));
-
             recorder.startRecording();
-            monitorTrack.play();
             Thread.sleep(250);
 
             AudioDeviceInfo routedIn = recorder.getRoutedDevice();
-            AudioDeviceInfo routedOut = monitorTrack.getRoutedDevice();
             actualInput = routedIn == null ? deviceLabel(selectedInput) : deviceLabel(routedIn);
-            actualOutput = routedOut == null
-                    ? (selectedOutput == null ? "System default" : deviceLabel(selectedOutput))
-                    : deviceLabel(routedOut);
+            actualOutput = selectedOutput == null
+                    ? "Alarm only — system default"
+                    : "Alarm only — " + deviceLabel(selectedOutput);
 
             statusText = "Waiting for selected microphone route…";
             updateNotification();
@@ -218,11 +184,6 @@ public class MonitorService extends Service {
 
                 currentDb = 20.0 * Math.log10(Math.max(smoothedRms / 32767.0, 0.000001));
 
-                if (monitorTrack != null) {
-                    monitorTrack.write(buffer, 0, read, AudioTrack.WRITE_BLOCKING);
-                    AudioDeviceInfo ro = monitorTrack.getRoutedDevice();
-                    if (ro != null) actualOutput = deviceLabel(ro);
-                }
                 AudioDeviceInfo ri = recorder.getRoutedDevice();
                 if (ri != null) actualInput = deviceLabel(ri);
 
@@ -233,7 +194,6 @@ public class MonitorService extends Service {
                     routeMatchedSince = 0L;
                     routeStable = false;
                     belowSince = 0L;
-                    aboveSince = 0L;
                     statusText = "Waiting for selected mic — routed to " +
                             (ri == null ? "unknown" : deviceLabel(ri));
                     continue;
@@ -243,7 +203,6 @@ public class MonitorService extends Service {
                     routeMatchedSince = now;
                     routeStable = false;
                     belowSince = 0L;
-                    aboveSince = 0L;
                     smoothedRms = rms;
                     statusText = "Selected mic connected — stabilizing…";
                     continue;
@@ -252,7 +211,6 @@ public class MonitorService extends Service {
                 if (!routeStable && now - routeMatchedSince >= 3000L) {
                     routeStable = true;
                     belowSince = 0L;
-                    aboveSince = 0L;
                     smoothedRms = rms;
                     currentDb = 20.0 * Math.log10(Math.max(smoothedRms / 32767.0, 0.000001));
                     statusText = "Monitoring — route stable";
@@ -276,7 +234,6 @@ public class MonitorService extends Service {
                         triggerAlarm("TOO LOUD", currentDb);
                     }
                 } else {
-                    aboveSince = 0L;
                 }
             }
         } catch (SecurityException e) {
@@ -358,8 +315,9 @@ public class MonitorService extends Service {
     private void configureBluetoothInput(AudioDeviceInfo selectedInput, boolean bluetoothSco) throws InterruptedException {
         if (audioManager == null || !bluetoothSco) return;
 
-        audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
-
+        // On modern Android, request the Bluetooth communication endpoint without
+        // taking over MODE_IN_COMMUNICATION. This keeps normal media playback in
+        // other apps as independent as the platform allows.
         if (Build.VERSION.SDK_INT >= 31) {
             try {
                 List<AudioDeviceInfo> communicationDevices = audioManager.getAvailableCommunicationDevices();
@@ -373,6 +331,7 @@ public class MonitorService extends Service {
             } catch (SecurityException ignored) {}
         } else {
             try {
+                audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
                 audioManager.startBluetoothSco();
                 audioManager.setBluetoothScoOn(true);
                 Thread.sleep(1200);
@@ -488,9 +447,6 @@ public class MonitorService extends Service {
         if (recorder != null) {
             try { recorder.stop(); } catch (Exception ignored) {}
         }
-        if (monitorTrack != null) {
-            try { monitorTrack.stop(); } catch (Exception ignored) {}
-        }
         if (monitorThread != null) {
             monitorThread.interrupt();
             monitorThread = null;
@@ -505,14 +461,6 @@ public class MonitorService extends Service {
             try { recorder.release(); } catch (Exception ignored) {}
             recorder = null;
         }
-        if (monitorTrack != null) {
-            try { monitorTrack.pause(); } catch (Exception ignored) {}
-            try { monitorTrack.flush(); } catch (Exception ignored) {}
-            try { monitorTrack.stop(); } catch (Exception ignored) {}
-            try { monitorTrack.release(); } catch (Exception ignored) {}
-            monitorTrack = null;
-        }
-
         if (automaticGainControl != null) {
             try { automaticGainControl.release(); } catch (Exception ignored) {}
             automaticGainControl = null;
