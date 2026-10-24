@@ -2,6 +2,7 @@ package com.calculatedcode.sawmonitor;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
@@ -11,6 +12,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -98,6 +100,16 @@ public class MainActivity extends Activity {
         inputSpinner = new Spinner(this);
         root.addView(inputSpinner, matchWrap());
 
+        Button prepareBluetooth = new Button(this);
+        prepareBluetooth.setText("Prepare Bluetooth for monitoring");
+        prepareBluetooth.setOnClickListener(v -> showBluetoothSetupDialog());
+        root.addView(prepareBluetooth, matchWrap());
+
+        TextView prepareHint = new TextView(this);
+        prepareHint.setText("Required for using the JBL microphone while TikTok, YouTube, or other media plays from the phone.");
+        prepareHint.setPadding(0, dp(4), 0, dp(10));
+        root.addView(prepareHint);
+
         root.addView(sectionLabel("Alarm output"));
         outputSpinner = new Spinner(this);
         root.addView(outputSpinner, matchWrap());
@@ -108,7 +120,7 @@ public class MainActivity extends Activity {
         root.addView(refresh, matchWrap());
 
         TextView hint = new TextView(this);
-        hint.setText("For a JBL with a call microphone, pair it in Android Bluetooth settings first, then choose the Bluetooth call audio / SCO input. Phone speaker is selected by default for output.");
+        hint.setText("For a JBL with a call microphone: keep Phone calls ON and turn Media audio OFF in Android Bluetooth settings. Then choose the Bluetooth call audio / SCO input here. The phone speaker is used only for the alarm.");
         hint.setPadding(0, dp(8), 0, dp(16));
         root.addView(hint);
 
@@ -180,6 +192,37 @@ public class MainActivity extends Activity {
         root.addView(safety);
 
         setContentView(scroll);
+    }
+
+    private void showBluetoothSetupDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("Prepare JBL for Saw Monitor")
+                .setMessage(
+                        "Android does not let Saw Monitor toggle this profile setting itself.\n\n" +
+                        "In Bluetooth settings:\n" +
+                        "1. Tap the settings/gear next to your JBL.\n" +
+                        "2. Turn Media audio OFF.\n" +
+                        "3. Leave Phone calls ON.\n" +
+                        "4. Return to Saw Monitor and start monitoring.\n\n" +
+                        "This keeps the JBL microphone available for Saw Monitor while TikTok, YouTube, and other media play through the phone.")
+                .setPositiveButton("Open Bluetooth settings", (dialog, which) -> {
+                    Intent intent = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS);
+                    try {
+                        startActivity(intent);
+                    } catch (Exception e) {
+                        startActivity(new Intent(Settings.ACTION_SETTINGS));
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (audioManager != null && inputSpinner != null && outputSpinner != null) {
+            refreshDevices();
+        }
     }
 
     private void requestNeededPermissions() {
